@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="launcher_bg">#FFFFF7E0</color>
+    <color name="paper">#FFFCFBF8</color>
+    <color name="home_bg">#FFF7F5F0</color>
+    <color name="ink">#FF1D1D1F</color>
+    <color name="ink_secondary">#FF8A8A8E</color>
+    <color name="daffodil">#FFF4C542</color>
+    <color name="daffodil_dark">#FFB98600</color>
+</resources>

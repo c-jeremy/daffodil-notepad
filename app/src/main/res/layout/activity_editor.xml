@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/paper">
+
+    <app.daffodil.ink.InkSurface
+        android:id="@+id/ink"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <LinearLayout
+        android:id="@+id/toolbar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_toolbar"
+        android:elevation="5dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="2dp">
+
+        <ImageView android:id="@+id/btnBack" style="@style/ToolButton" android:src="@drawable/ic_back" android:contentDescription="返回" />
+
+        <View style="@style/ToolDivider" />
+
+        <app.daffodil.ui.SwatchView android:id="@+id/penBlack" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="黑色笔" />
+        <app.daffodil.ui.SwatchView android:id="@+id/penRed" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="红色笔" />
+        <app.daffodil.ui.SwatchView android:id="@+id/penBlue" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="蓝色笔" />
+        <app.daffodil.ui.SizeView android:id="@+id/penSize" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="笔触粗细" />
+
+        <View style="@style/ToolDivider" />
+
+        <ImageView android:id="@+id/btnEraser" style="@style/ToolButton" android:src="@drawable/ic_eraser" android:contentDescription="橡皮" />
+        <ImageView android:id="@+id/btnLasso" style="@style/ToolButton" android:src="@drawable/ic_lasso" android:contentDescription="套索" />
+        <ImageView android:id="@+id/btnImage" style="@style/ToolButton" android:src="@drawable/ic_image" android:contentDescription="插入图片" />
+
+        <View style="@style/ToolDivider" />
+
+        <ImageView android:id="@+id/btnUndo" style="@style/ToolButton" android:src="@drawable/ic_undo" android:contentDescription="撤销" />
+        <ImageView android:id="@+id/btnRedo" style="@style/ToolButton" android:src="@drawable/ic_redo" android:contentDescription="重做" />
+
+        <View style="@style/ToolDivider" />
+
+        <ImageView android:id="@+id/btnMore" style="@style/ToolButton" android:src="@drawable/ic_more" android:contentDescription="更多" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/selectionBar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:background="@drawable/bg_toolbar"
+        android:elevation="5dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="2dp"
+        android:visibility="gone">
+
+        <ImageView android:id="@+id/selDelete" style="@style/ToolButton" android:src="@drawable/ic_trash" android:contentDescription="删除" />
+        <ImageView android:id="@+id/selCopy" style="@style/ToolButton" android:src="@drawable/ic_copy" android:contentDescription="复制" />
+        <View android:id="@+id/selDivider" style="@style/ToolDivider" />
+        <app.daffodil.ui.SwatchView android:id="@+id/selBlack" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="改为黑色" />
+        <app.daffodil.ui.SwatchView android:id="@+id/selRed" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="改为红色" />
+        <app.daffodil.ui.SwatchView android:id="@+id/selBlue" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="改为蓝色" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/hint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="28dp"
+        android:background="@drawable/bg_hint"
+        android:paddingStart="14dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="13sp"
+        android:alpha="0"
+        android:visibility="gone" />
+
+    <ProgressBar
+        android:id="@+id/loading"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:layout_gravity="center"
+        android:indeterminateTint="@color/daffodil_dark" />
+</FrameLayout>

@@ -1,0 +1,77 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode release keystore (optional)
+        env:
+          KEYSTORE_B64: ${{ secrets.DAFFODIL_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "DAFFODIL_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "Using release keystore from secrets"
+          else
+            echo "No release keystore secret; release APK will use the repo debug key"
+          fi
+
+      - name: Build
+        env:
+          DAFFODIL_KEYSTORE_PASSWORD: ${{ secrets.DAFFODIL_KEYSTORE_PASSWORD }}
+          DAFFODIL_KEY_ALIAS: ${{ secrets.DAFFODIL_KEY_ALIAS }}
+          DAFFODIL_KEY_PASSWORD: ${{ secrets.DAFFODIL_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          set -o pipefail
+          ./gradlew --no-daemon --stacktrace assembleRelease 2>&1 | tee build.log
+
+      - name: Report compile errors
+        if: failure()
+        run: |
+          grep -E "^e: |error:|What went wrong|Could not|Unresolved|Execution failed" build.log | head -60 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk out/Daffodil-${{ github.run_number }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Daffodil-${{ github.run_number }}
+          path: out/*.apk
+
+      - name: Publish "latest" release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/*.apk \
+            --title "Daffodil build ${{ github.run_number }}" \
+            --notes "Automatic build from ${{ github.sha }}" \
+            --prerelease
