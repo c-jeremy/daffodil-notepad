@@ -35,6 +35,7 @@ class Frame(
     val selection: SelectionDraw?,
     val lasso: FloatArray?,        // screen x,y pairs
     val cursor: FloatArray?,       // screen x, y, r
+    val wet: WetBatch?,            // in-progress stroke when front buffering is off
 )
 
 /** One batch of wet ink for the front buffer: screen-space (x, y, r) triples. */
@@ -145,6 +146,7 @@ class SceneDrawer(private val density: Float) {
                 canvas.drawPath(lassoPath, lassoStroke)
             }
         }
+        f.wet?.let { drawWet(canvas, it) }
         f.cursor?.let { c ->
             canvas.drawCircle(c[0], c[1], c[2], cursorFill)
             canvas.drawCircle(c[0], c[1], c[2], cursorStroke)

@@ -99,6 +99,11 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     var autoReturnAfterLasso = true
     var fingerDraws = false
     var twoFingerTapUndo = true
+    /** Ask the system for every raw input sample immediately (can break some OEM stylus stacks). */
+    var unbufferedInput = false
+    /** Draw wet ink straight to the display buffer. Off = ordinary double-buffered drawing. */
+    var useFrontBuffer = true
+        set(v) { finalizePen(); field = v; invalidateScene() }
     private var returnTool: Tool = Tool.PEN
 
     fun setTool(t: Tool) {
@@ -264,7 +269,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     }
 
     private fun renderScene() {
-        if (frontActive) { pendingScene = true; return }
+        if (frontActive && useFrontBuffer) { pendingScene = true; return }
         val r = renderer ?: return
         frame = buildFrame()
         r.renderMultiBufferedLayer(DUMMY)
@@ -273,7 +278,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private fun buildFrame(): Frame {
         val m = Matrix().apply { setScale(scale, scale); postTranslate(tx, ty) }
         val vis = visibleWorld()
-        val d = doc ?: return Frame(m, vis, false, emptyList(), emptyList(), emptyList(), null, null, null)
+        val d = doc ?: return Frame(m, vis, false, emptyList(), emptyList(), emptyList(), null, null, null, null)
         ensureChunks(d)
         val sel = selection
         val imgs = ArrayList<ImgDraw>()
@@ -289,6 +294,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             pdf?.drawList(vis) ?: emptyList(),
             imgs, chunks.filterNotNull(), selDraw,
             lassoScreen?.toArray(), cursor,
+            if (!useFrontBuffer && frontActive && spts.size >= 3) WetBatch(strokeColor, spts.toArray(), spts.size / 3) else null,
         )
     }
 
@@ -338,7 +344,8 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private fun isPenTool(t: Int) =
         t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER || t == MotionEvent.TOOL_TYPE_MOUSE
 
-    private fun fingersSuppressed() = penHovering || SystemClock.uptimeMillis() - lastPenSeen < 400
+    // Time-based only: hover events may stop reaching us once we stop consuming them.
+    private fun fingersSuppressed() = SystemClock.uptimeMillis() - lastPenSeen < 450
 
     override fun onHoverEvent(e: MotionEvent): Boolean {
         val tt = e.getToolType(0)
@@ -358,7 +365,9 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
                     if (cursor != null && mode == Mode.NONE) { cursor = null; invalidateScene() }
                 }
             }
-            return true
+            dbgHover++
+            // Observe only: consuming stylus hover changes how some OEM stacks route the pen.
+            return super.onHoverEvent(e)
         }
         return super.onHoverEvent(e)
     }
@@ -372,6 +381,11 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private var dbgPUp = 0
     private var dbgCanceledFlag = 0
     private var dbgStitched = 0
+    private var dbgMove = 0
+    private var dbgSamples = 0
+    private var dbgHover = 0
+    /** Filled in by the activity: what the window saw before the view. */
+    var windowStats: () -> String = { "" }
     private var dbgLast = 0L
 
     private fun debugEvent(e: MotionEvent) {
@@ -382,6 +396,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             MotionEvent.ACTION_CANCEL -> dbgCancel++
             MotionEvent.ACTION_POINTER_DOWN -> dbgPDown++
             MotionEvent.ACTION_POINTER_UP -> dbgPUp++
+            MotionEvent.ACTION_MOVE -> { dbgMove++; dbgSamples += e.historySize + 1 }
         }
         if ((e.flags and 0x20) != 0) dbgCanceledFlag++ // MotionEvent.FLAG_CANCELED (API 33)
         val now = SystemClock.uptimeMillis()
@@ -394,8 +409,10 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             }
         }
         sink(
-            "DOWN $dbgDown  UP $dbgUp  CANCEL $dbgCancel  P↓ $dbgPDown  P↑ $dbgPUp  被系统取消 $dbgCanceledFlag  接续 $dbgStitched\n" +
-                "${MotionEvent.actionToString(e.actionMasked)}  [$tools]  history ${e.historySize}  压力 ${"%.2f".format(e.getPressure(0))}  模式 $mode"
+            "画布: DOWN $dbgDown  MOVE $dbgMove(采样 $dbgSamples)  UP $dbgUp  CANCEL $dbgCancel  P↓ $dbgPDown  P↑ $dbgPUp  悬停 $dbgHover  接续 $dbgStitched\n" +
+                "窗口: ${windowStats()}\n" +
+                "${MotionEvent.actionToString(e.actionMasked)}  [$tools]  history ${e.historySize}  压力 ${"%.2f".format(e.getPressure(0))}  模式 $mode  " +
+                "不合并输入=${if (unbufferedInput) "开" else "关"}  前缓冲=${if (useFrontBuffer) "开" else "关"}"
         )
     }
 
@@ -463,7 +480,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     }
 
     private fun startInk(e: MotionEvent, idx: Int, fromFinger: Boolean) {
-        requestUnbufferedDispatch(e)
+        if (unbufferedInput) requestUnbufferedDispatch(e)
         scroller.forceFinished(true)
         mode = Mode.INK
         inkPointerId = e.getPointerId(idx)
@@ -561,7 +578,8 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         strokeColor = penColor
         baseR = PEN_SIZES[penSize.coerceIn(0, 2)] / 2f
         penSample(x, y, p)
-        renderer?.renderFrontBufferedLayer(WetBatch(strokeColor, spts.copyRange(0, 3), 1))
+        if (useFrontBuffer) renderer?.renderFrontBufferedLayer(WetBatch(strokeColor, spts.copyRange(0, 3), 1))
+        else invalidateScene()
         emitted = 1
     }
 
@@ -583,7 +601,8 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         val start = emitted - 1
         val count = n - start
         if (count < 2) return
-        renderer?.renderFrontBufferedLayer(WetBatch(strokeColor, spts.copyRange(start * 3, n * 3), count))
+        if (useFrontBuffer) renderer?.renderFrontBufferedLayer(WetBatch(strokeColor, spts.copyRange(start * 3, n * 3), count))
+        else invalidateScene()
         emitted = n
     }
 

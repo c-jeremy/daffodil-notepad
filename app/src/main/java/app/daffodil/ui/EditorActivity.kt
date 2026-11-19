@@ -141,6 +141,20 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         }
     }
 
+    private var wDown = 0
+    private var wMove = 0
+    private var wUp = 0
+    private var wSamples = 0
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        if (ink.debugSink != null) when (ev.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> wDown++
+            android.view.MotionEvent.ACTION_MOVE -> { wMove++; wSamples += ev.historySize + 1 }
+            android.view.MotionEvent.ACTION_UP -> wUp++
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) WindowInsetsControllerCompat(window, window.decorView).hide(WindowInsetsCompat.Type.systemBars())
@@ -251,6 +265,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         m.add(1, 12, 5, "双指轻点撤销 / 三指重做").setCheckable(true).isChecked = ink.twoFingerTapUndo
         m.add(1, 13, 6, "工具栏放在底部").setCheckable(true).isChecked = toolbarBottom
         m.add(1, 14, 7, "显示触控调试信息").setCheckable(true).isChecked = ink.debugSink != null
+        m.add(2, 15, 8, "实验：不合并触控事件").setCheckable(true).isChecked = ink.unbufferedInput
+        m.add(2, 16, 9, "实验：前缓冲低延迟渲染").setCheckable(true).isChecked = ink.useFrontBuffer
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> ink.resetView()
@@ -261,6 +277,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
                 12 -> { ink.twoFingerTapUndo = !ink.twoFingerTapUndo; saveSettings() }
                 13 -> { toolbarBottom = !toolbarBottom; placeToolbar(); saveSettings() }
                 14 -> toggleDebug()
+                15 -> { ink.unbufferedInput = !ink.unbufferedInput; saveSettings() }
+                16 -> { ink.useFrontBuffer = !ink.useFrontBuffer; saveSettings() }
             }
             true
         }
@@ -272,6 +290,7 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         if (ink.debugSink == null) {
             tv.visibility = View.VISIBLE
             tv.text = "用笔写几笔，这里会显示原始触控事件"
+            ink.windowStats = { "DOWN $wDown  MOVE $wMove(采样 $wSamples)  UP $wUp" }
             ink.debugSink = { tv.text = it }
         } else {
             ink.debugSink = null
@@ -353,6 +372,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         ink.autoReturnAfterLasso = prefs.getBoolean("autoReturn", true)
         ink.fingerDraws = prefs.getBoolean("fingerDraws", false)
         ink.twoFingerTapUndo = prefs.getBoolean("tapUndo", true)
+        ink.unbufferedInput = prefs.getBoolean("unbuffered2", false)
+        ink.useFrontBuffer = prefs.getBoolean("frontBuffer", true)
         toolbarBottom = prefs.getBoolean("toolbarBottom", false)
         placeToolbar()
         refreshTools()
@@ -365,6 +386,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
             .putBoolean("autoReturn", ink.autoReturnAfterLasso)
             .putBoolean("fingerDraws", ink.fingerDraws)
             .putBoolean("tapUndo", ink.twoFingerTapUndo)
+            .putBoolean("unbuffered2", ink.unbufferedInput)
+            .putBoolean("frontBuffer", ink.useFrontBuffer)
             .putBoolean("toolbarBottom", toolbarBottom)
             .apply()
     }
