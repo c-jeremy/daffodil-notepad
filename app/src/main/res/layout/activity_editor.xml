@@ -83,6 +83,19 @@
         android:alpha="0"
         android:visibility="gone" />
 
+    <TextView
+        android:id="@+id/debug"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="8dp"
+        android:background="#CC1D1D1F"
+        android:fontFamily="monospace"
+        android:padding="6dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="10sp"
+        android:visibility="gone" />
+
     <ProgressBar
         android:id="@+id/loading"
         android:layout_width="36dp"

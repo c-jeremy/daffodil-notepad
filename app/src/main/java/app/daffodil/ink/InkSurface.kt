@@ -53,6 +53,8 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         /** Pen diameters in world units (PDF points / dp on a blank canvas). */
         val PEN_SIZES = floatArrayOf(1.3f, 2.2f, 3.8f)
         private const val CHUNK = 48
+        private const val UP_STITCH_MS = 60L
+        private const val CANCEL_STITCH_MS = 180L
         private const val MIN_ZOOM = 0.08f
         private const val MAX_ZOOM = 40f
         private val DUMMY = listOf(WetBatch(0, FloatArray(0), 0))
@@ -100,6 +102,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private var returnTool: Tool = Tool.PEN
 
     fun setTool(t: Tool) {
+        finalizePen()
         if (t == tool) return
         if (t == Tool.LASSO) returnTool = tool
         if (tool == Tool.LASSO) clearSelection()
@@ -246,6 +249,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     }
 
     override fun onDetachedFromWindow() {
+        finalizePen()
         renderer?.release(true)
         renderer = null
         super.onDetachedFromWindow()
@@ -359,9 +363,46 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         return super.onHoverEvent(e)
     }
 
+    // ---- input diagnostics (toggle from the ⋯ menu)
+    var debugSink: ((String) -> Unit)? = null
+    private var dbgDown = 0
+    private var dbgUp = 0
+    private var dbgCancel = 0
+    private var dbgPDown = 0
+    private var dbgPUp = 0
+    private var dbgCanceledFlag = 0
+    private var dbgStitched = 0
+    private var dbgLast = 0L
+
+    private fun debugEvent(e: MotionEvent) {
+        val sink = debugSink ?: return
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> dbgDown++
+            MotionEvent.ACTION_UP -> dbgUp++
+            MotionEvent.ACTION_CANCEL -> dbgCancel++
+            MotionEvent.ACTION_POINTER_DOWN -> dbgPDown++
+            MotionEvent.ACTION_POINTER_UP -> dbgPUp++
+        }
+        if ((e.flags and 0x20) != 0) dbgCanceledFlag++ // MotionEvent.FLAG_CANCELED (API 33)
+        val now = SystemClock.uptimeMillis()
+        if (e.actionMasked == MotionEvent.ACTION_MOVE && now - dbgLast < 60) return
+        dbgLast = now
+        val tools = (0 until e.pointerCount).joinToString(",") {
+            when (e.getToolType(it)) {
+                MotionEvent.TOOL_TYPE_STYLUS -> "笔"; MotionEvent.TOOL_TYPE_ERASER -> "笔尾"
+                MotionEvent.TOOL_TYPE_FINGER -> "指"; MotionEvent.TOOL_TYPE_MOUSE -> "鼠"; else -> "?"
+            }
+        }
+        sink(
+            "DOWN $dbgDown  UP $dbgUp  CANCEL $dbgCancel  P↓ $dbgPDown  P↑ $dbgPUp  被系统取消 $dbgCanceledFlag  接续 $dbgStitched\n" +
+                "${MotionEvent.actionToString(e.actionMasked)}  [$tools]  history ${e.historySize}  压力 ${"%.2f".format(e.getPressure(0))}  模式 $mode"
+        )
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (doc == null) return false
+        debugEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val idx = e.actionIndex
@@ -432,6 +473,13 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         val sideButton = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
         inkTool = if (tt == MotionEvent.TOOL_TYPE_ERASER || (sideButton && tool == Tool.PEN)) Tool.ERASER else tool
         val x = e.getX(idx); val y = e.getY(idx)
+        if (penSuspended) {
+            if (inkTool == Tool.PEN && !fromFinger && canResume(x, y, e.eventTime)) {
+                resumePen(x, y, pressureOf(e, idx, -1))
+                return
+            }
+            finalizePen()
+        }
         when (inkTool) {
             Tool.PEN -> penDown(x, y, pressureOf(e, idx, -1))
             Tool.ERASER -> eraseDown(x, y)
@@ -460,7 +508,10 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private fun inkUp(e: MotionEvent, idx: Int) {
         if (!inkFromFinger) lastPenSeen = SystemClock.uptimeMillis()
         when (inkTool) {
-            Tool.PEN -> { penSample(e.getX(idx), e.getY(idx), pressureOf(e, idx, -1)); emitWet(); penUp() }
+            Tool.PEN -> {
+                penSample(e.getX(idx), e.getY(idx), pressureOf(e, idx, -1)); emitWet()
+                if (inkFromFinger) { penSuspended = true; finalizePen() } else suspendPen(e.eventTime, UP_STITCH_MS)
+            }
             Tool.ERASER -> { eraseTo(e.getX(idx), e.getY(idx)); eraseUp() }
             Tool.LASSO -> { lassoMove(e.getX(idx), e.getY(idx)); lassoUp() }
         }
@@ -470,10 +521,16 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private fun cancelInk() {
         when (inkTool) {
             Tool.PEN -> {
-                renderer?.cancel()
-                frontActive = false
-                pts.clear(); spts.clear()
-                if (pendingScene) { pendingScene = false; invalidateScene() }
+                if (!inkFromFinger && pts.size > 0) {
+                    // Many OEM palm-rejection layers cancel the stream mid-stroke and then
+                    // restart it with a fresh DOWN. Keep the ink and try to stitch.
+                    suspendPen(SystemClock.uptimeMillis(), CANCEL_STITCH_MS)
+                } else {
+                    renderer?.cancel()
+                    frontActive = false
+                    pts.clear(); spts.clear()
+                    if (pendingScene) { pendingScene = false; invalidateScene() }
+                }
             }
             Tool.ERASER -> eraseUp()
             Tool.LASSO -> { lassoScreen = null; lassoWorld = null; selDrag = 0; selection?.transform?.reset(); invalidateScene() }
@@ -530,7 +587,42 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         emitted = n
     }
 
-    private fun penUp() {
+    private var penSuspended = false
+    private var suspendedAt = 0L
+    private var suspendWindow = 0L
+    private val finalizeRunnable = Runnable { finalizePen() }
+
+    /** The pen left the screen; wait briefly in case contact was only lost for a moment. */
+    private fun suspendPen(time: Long, window: Long) {
+        penSuspended = true
+        suspendedAt = time
+        suspendWindow = window
+        removeCallbacks(finalizeRunnable)
+        postDelayed(finalizeRunnable, window + 8)
+    }
+
+    private fun canResume(x: Float, y: Float, time: Long): Boolean {
+        if (time - suspendedAt > suspendWindow) return false
+        val n = spts.size
+        if (n < 3) return false
+        return hypot(x - spts[n - 3], y - spts[n - 2]) < 32f * density
+    }
+
+    private fun resumePen(x: Float, y: Float, p: Float) {
+        removeCallbacks(finalizeRunnable)
+        penSuspended = false
+        dbgStitched++
+        penSample(x, y, p)
+        emitWet()
+    }
+
+    /** Commits a pending stroke (if any). Call before anything else touches the scene. */
+    fun flushPendingStroke() = finalizePen()
+
+    private fun finalizePen() {
+        if (!penSuspended) return
+        removeCallbacks(finalizeRunnable)
+        penSuspended = false
         val d = doc
         val n = pts.size / 3
         if (d != null && n > 0) {
@@ -540,10 +632,15 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             d.perform(Edit.Add(listOf(Stroke(d.newId(), strokeColor, xs, ys, rs))))
             listener?.onHistoryChanged()
         }
+        pts.clear(); spts.clear()
         frontActive = false
         pendingScene = false
         frame = buildFrame()
         renderer?.commit()
+        // The commit already draws the latest scene. An extra multi-buffered render right
+        // after it would cancel queued front-buffer work of a quickly following stroke.
+        removeCallbacks(frameCallback)
+        sceneScheduled = false
     }
 
     // ---------------------------------------------------------------- eraser
@@ -859,6 +956,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
 
     /** Places an imported picture in the middle of the view and selects it. */
     fun insertImage(file: String, w: Int, h: Int) {
+        finalizePen()
         val d = doc ?: return
         val vis = visibleWorld()
         val f = min(min(vis.width() * 0.6f / w, vis.height() * 0.6f / h), 0.5f)
@@ -878,12 +976,14 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     // ---------------------------------------------------------------- undo / redo
 
     fun undo() {
+        finalizePen()
         val d = doc ?: return
         clearSelection()
         if (d.undo()) { listener?.onHistoryChanged(); listener?.onHint("撤销") }
     }
 
     fun redo() {
+        finalizePen()
         val d = doc ?: return
         clearSelection()
         if (d.redo()) { listener?.onHistoryChanged(); listener?.onHint("重做") }
@@ -904,6 +1004,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private var flingY = 0
 
     private fun startNav(e: MotionEvent) {
+        finalizePen()
         mode = Mode.NAV
         scroller.forceFinished(true)
         navStart = e.eventTime

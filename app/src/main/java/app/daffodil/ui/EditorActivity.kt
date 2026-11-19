@@ -250,6 +250,7 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         m.add(1, 11, 4, "手指也能书写").setCheckable(true).isChecked = ink.fingerDraws
         m.add(1, 12, 5, "双指轻点撤销 / 三指重做").setCheckable(true).isChecked = ink.twoFingerTapUndo
         m.add(1, 13, 6, "工具栏放在底部").setCheckable(true).isChecked = toolbarBottom
+        m.add(1, 14, 7, "显示触控调试信息").setCheckable(true).isChecked = ink.debugSink != null
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> ink.resetView()
@@ -259,10 +260,23 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
                 11 -> { ink.fingerDraws = !ink.fingerDraws; saveSettings(); showHint(if (ink.fingerDraws) "单指书写，双指移动" else "单指移动画布") }
                 12 -> { ink.twoFingerTapUndo = !ink.twoFingerTapUndo; saveSettings() }
                 13 -> { toolbarBottom = !toolbarBottom; placeToolbar(); saveSettings() }
+                14 -> toggleDebug()
             }
             true
         }
         pm.show()
+    }
+
+    private fun toggleDebug() {
+        val tv = findViewById<TextView>(R.id.debug)
+        if (ink.debugSink == null) {
+            tv.visibility = View.VISIBLE
+            tv.text = "用笔写几笔，这里会显示原始触控事件"
+            ink.debugSink = { tv.text = it }
+        } else {
+            ink.debugSink = null
+            tv.visibility = View.GONE
+        }
     }
 
     private fun safeName() = (doc?.meta?.title ?: "Daffodil").replace(Regex("[\\\\/:*?\"<>|]"), "_")
@@ -359,6 +373,7 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
 
     private fun saveAsync(final: Boolean) {
         val d = doc ?: return
+        ink.flushPendingStroke()
         ink.saveViewport()
         if (!dirty && !final) return
         val wasDirty = dirty
@@ -434,6 +449,7 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
 
     private fun export(uri: Uri, png: Boolean) {
         val d = doc ?: return
+        ink.flushPendingStroke()
         val snap = DocStore.snapshot(d)
         showHint("正在导出…")
         io.execute {
