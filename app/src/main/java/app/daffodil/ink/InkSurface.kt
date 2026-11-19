@@ -589,8 +589,10 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             val dx = x - spts[spts.size - 3]; val dy = y - spts[spts.size - 2]
             if (dx * dx + dy * dy < 0.36f) return
         }
-        smoothP = if (smoothP < 0f) p else smoothP + 0.45f * (p - smoothP)
-        val r = baseR * (0.28f + 0.92f * smoothP.pow(0.75f))
+        smoothP = if (smoothP < 0f) p else smoothP + 0.32f * (p - smoothP)
+        // Width range ~2.1x between light and full pressure (was ~2.7x), with a heavier
+        // smoothing so small pressure wobbles barely change the line.
+        val r = baseR * (0.45f + 0.70f * smoothP.pow(0.85f))
         pts.add(toWorldX(x)); pts.add(toWorldY(y)); pts.add(r)
         spts.add(x); spts.add(y); spts.add(r * scale)
     }
