@@ -51,7 +51,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         const val INK_RED = 0xFFD7372A.toInt()
         const val INK_BLUE = 0xFF1E5BCF.toInt()
         /** Pen diameters in world units (PDF points / dp on a blank canvas). */
-        val PEN_SIZES = floatArrayOf(1.3f, 2.2f, 3.8f)
+        val PEN_SIZES = floatArrayOf(0.9f, 1.5f, 2.6f)
         private const val CHUNK = 48
         private const val UP_STITCH_MS = 60L
         private const val CANCEL_STITCH_MS = 180L
