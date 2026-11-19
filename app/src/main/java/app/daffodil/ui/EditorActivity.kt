@@ -55,6 +55,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
     private lateinit var penRed: SwatchView
     private lateinit var penBlue: SwatchView
     private lateinit var penSize: SizeView
+    private lateinit var btnHighlighter: ImageView
+    private lateinit var pageLabel: TextView
     private lateinit var btnEraser: ImageView
     private lateinit var btnLasso: ImageView
     private lateinit var btnUndo: ImageView
@@ -94,6 +96,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         penRed = findViewById(R.id.penRed)
         penBlue = findViewById(R.id.penBlue)
         penSize = findViewById(R.id.penSize)
+        btnHighlighter = findViewById(R.id.btnHighlighter)
+        pageLabel = findViewById(R.id.pageLabel)
         btnEraser = findViewById(R.id.btnEraser)
         btnLasso = findViewById(R.id.btnLasso)
         btnUndo = findViewById(R.id.btnUndo)
@@ -115,9 +119,11 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
                 main.post {
                     if (isDestroyed) { p?.close(); return@post }
                     doc = d; pdf = p
+                    ink.paper = d.meta.paper
                     ink.bind(d, p)
                     findViewById<ProgressBar>(R.id.loading).visibility = View.GONE
                     refreshHistory()
+                    updatePageLabel()
                 }
             } catch (t: Throwable) {
                 main.post {
@@ -195,6 +201,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
             }
         }
         penSize.setOnClickListener { cycleSize() }
+        btnHighlighter.setOnClickListener { ink.setTool(Tool.HIGHLIGHTER); refreshTools() }
+        pageLabel.setOnClickListener { askPage() }
         btnEraser.setOnClickListener {
             if (ink.tool == Tool.ERASER) {
                 ink.partialEraser = !ink.partialEraser
@@ -208,8 +216,8 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         findViewById<View>(R.id.btnImage).setOnClickListener {
             pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
-        btnUndo.setOnClickListener { ink.undo() }
-        btnRedo.setOnClickListener { ink.redo() }
+        repeatWhileHeld(btnUndo) { ink.undo() }
+        repeatWhileHeld(btnRedo) { ink.redo() }
         findViewById<View>(R.id.btnMore).setOnClickListener { showMenu(it) }
 
         // Tooltips double as hover labels for a stylus.
@@ -218,12 +226,78 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         penRed.tooltipText = "红色（再点一次换粗细）"
         penBlue.tooltipText = "蓝色（再点一次换粗细）"
         penSize.tooltipText = "粗细"
+        btnHighlighter.tooltipText = "荧光笔"
         btnEraser.tooltipText = "橡皮（再点一次切换整笔/局部）"
         btnLasso.tooltipText = "套索"
         findViewById<View>(R.id.btnImage).tooltipText = "插入图片"
-        btnUndo.tooltipText = "撤销"
-        btnRedo.tooltipText = "重做"
+        btnUndo.tooltipText = "撤销（按住连续撤销）"
+        btnRedo.tooltipText = "重做（按住连续重做）"
         findViewById<View>(R.id.btnMore).tooltipText = "更多"
+    }
+
+    /** Tap = once; hold = keep going, faster and faster. */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun repeatWhileHeld(v: View, action: () -> Unit) {
+        var repeated = false
+        val runner = object : Runnable {
+            var delay = 220L
+            override fun run() {
+                repeated = true
+                action()
+                delay = max(45L, (delay * 0.8f).toLong())
+                v.postDelayed(this, delay)
+            }
+        }
+        v.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    repeated = false; runner.delay = 220L
+                    v.isPressed = true
+                    v.postDelayed(runner, 450L)
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    v.removeCallbacks(runner); v.isPressed = false
+                    if (!repeated) action()
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> { v.removeCallbacks(runner); v.isPressed = false }
+            }
+            true
+        }
+    }
+
+    private fun updatePageLabel() {
+        val p = pdf
+        if (p == null) { pageLabel.visibility = View.GONE; return }
+        val i = ink.currentPage()
+        pageLabel.text = "${i + 1} / ${p.pageCount}"
+        pageLabel.visibility = View.VISIBLE
+    }
+
+    private fun askPage() {
+        val p = pdf ?: return
+        val d = resources.displayMetrics.density
+        val input = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            hint = "1 – ${p.pageCount}"
+            setText((ink.currentPage() + 1).toString())
+            selectAll()
+        }
+        val box = FrameLayout(this).apply {
+            setPadding((22 * d).toInt(), (8 * d).toInt(), (22 * d).toInt(), 0)
+            addView(input)
+        }
+        val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle("跳到第几页")
+            .setView(box)
+            .setPositiveButton("跳转") { _, _ ->
+                val n = input.text.toString().toIntOrNull() ?: return@setPositiveButton
+                ink.goToPage((n - 1).coerceIn(0, p.pageCount - 1))
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        dialog.show()
+        input.requestFocus()
     }
 
     private fun cycleSize() {
@@ -243,6 +317,7 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         penBlue.isSelected = penBlue.active
         penSize.color = ink.penColor
         penSize.level = ink.penSize
+        btnHighlighter.isSelected = t == Tool.HIGHLIGHTER
         btnEraser.isSelected = t == Tool.ERASER
         btnEraser.setImageResource(if (ink.partialEraser) R.drawable.ic_eraser_partial else R.drawable.ic_eraser)
         btnLasso.isSelected = t == Tool.LASSO
@@ -259,7 +334,14 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
         val m = pm.menu
         m.add(0, 1, 0, if (pdf != null) "适应页宽" else "显示全部内容")
         m.add(0, 2, 1, "导出 PDF")
-        if (pdf == null) m.add(0, 3, 2, "导出 PNG 图片")
+        if (pdf == null) {
+            m.add(0, 3, 2, "导出 PNG 图片")
+            val sub = m.addSubMenu(0, 20, 2, "画布背景")
+            arrayOf("空白", "点阵", "横线", "方格").forEachIndexed { i, name ->
+                sub.add(3, 30 + i, i, name).isChecked = (doc?.meta?.paper ?: 0) == i
+            }
+            sub.setGroupCheckable(3, true, true)
+        }
         m.add(1, 10, 3, "套索操作后切回原来的笔").setCheckable(true).isChecked = ink.autoReturnAfterLasso
         m.add(1, 11, 4, "手指也能书写").setCheckable(true).isChecked = ink.fingerDraws
         m.add(1, 12, 5, "双指轻点撤销 / 三指重做").setCheckable(true).isChecked = ink.twoFingerTapUndo
@@ -279,6 +361,11 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
                 14 -> toggleDebug()
                 15 -> { ink.unbufferedInput = !ink.unbufferedInput; saveSettings() }
                 16 -> { ink.useFrontBuffer = !ink.useFrontBuffer; saveSettings() }
+                in 30..33 -> doc?.let { d ->
+                    d.meta.paper = item.itemId - 30
+                    ink.paper = d.meta.paper
+                    onContentChanged()
+                }
             }
             true
         }
@@ -343,7 +430,10 @@ class EditorActivity : AppCompatActivity(), InkSurface.Listener {
 
     override fun onToolChanged() = refreshTools()
     override fun onSelectionChanged() = placeSelectionBar()
-    override fun onViewportChanged() { if (ink.selection != null) placeSelectionBar() }
+    override fun onViewportChanged() {
+        if (ink.selection != null) placeSelectionBar()
+        updatePageLabel()
+    }
     override fun onHistoryChanged() = refreshHistory()
     override fun onHint(text: String) = showHint(text)
 

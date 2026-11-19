@@ -13,6 +13,7 @@ class Stroke(
     val rs: FloatArray,
 ) {
     val size: Int get() = xs.size
+    val isHighlight: Boolean get() = (color ushr 24) != 0xFF
 
     val bounds: RectF = RectF().also { b ->
         if (xs.isEmpty()) return@also

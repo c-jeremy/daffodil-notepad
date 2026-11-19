@@ -15,6 +15,8 @@ class DocMeta(
     var viewCx: Float = Float.NaN,
     var viewCy: Float = Float.NaN,
     var viewZoom: Float = Float.NaN,
+    /** Paper pattern for blank canvases: 0 blank, 1 dots, 2 lines, 3 grid. */
+    var paper: Int = 0,
 )
 
 interface DocListener {

@@ -26,7 +26,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sqrt
 
-enum class Tool { PEN, ERASER, LASSO }
+enum class Tool { PEN, HIGHLIGHTER, ERASER, LASSO }
 
 /**
  * The drawing surface. Wet ink goes to a front-buffered layer (drawn straight to the
@@ -52,6 +52,10 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         const val INK_BLUE = 0xFF1E5BCF.toInt()
         /** Pen diameters in world units (PDF points / dp on a blank canvas). */
         val PEN_SIZES = floatArrayOf(0.9f, 1.5f, 2.6f)
+        /** Highlighter: translucent yellow, drawn underneath the ink. */
+        const val HIGHLIGHT = 0x66FFD21F
+        const val HIGHLIGHT_SIZE = 11f
+        private const val HOLD_MS = 450L
         private const val CHUNK = 48
         private const val UP_STITCH_MS = 60L
         private const val CANCEL_STITCH_MS = 180L
@@ -116,6 +120,10 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         invalidateScene()
         listener?.onToolChanged()
     }
+
+    /** Paper pattern for blank canvases: 0 blank, 1 dots, 2 lines, 3 grid. */
+    var paper: Int = 0
+        set(v) { field = v; invalidateScene() }
 
     private val eraserRadiusPx get() = (if (partialEraser) 11f else 7f) * density
 
@@ -278,7 +286,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private fun buildFrame(): Frame {
         val m = Matrix().apply { setScale(scale, scale); postTranslate(tx, ty) }
         val vis = visibleWorld()
-        val d = doc ?: return Frame(m, vis, false, emptyList(), emptyList(), emptyList(), null, null, null, null)
+        val d = doc ?: return Frame(m, vis, false, emptyList(), emptyList(), emptyList(), null, null, null, null, 0)
         ensureChunks(d)
         val sel = selection
         val imgs = ArrayList<ImgDraw>()
@@ -295,6 +303,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             imgs, chunks.filterNotNull(), selDraw,
             lassoScreen?.toArray(), cursor,
             if (!useFrontBuffer && frontActive && spts.size >= 3) WetBatch(strokeColor, spts.toArray(), spts.size / 3) else null,
+            if (pdf == null) paper else 0,
         )
     }
 
@@ -330,22 +339,53 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     }
 
     // ---------------------------------------------------------------- input routing
+    //
+    // The pen and every finger are tracked independently, so fingers keep working while
+    // the pen is hovering or even touching the screen. Palms are recognised by contact
+    // size (and the system's own cancel flag), not by timing.
 
-    private enum class Mode { NONE, INK, NAV, IGNORE }
+    private class Finger(val id: Int, val x0: Float, val y0: Float, var x: Float, var y: Float, var palm: Boolean)
 
-    private var mode = Mode.NONE
-    private var inkPointerId = -1
+    private val fingers = LinkedHashMap<Int, Finger>()
+    private var penId = -1             // pointer currently inking (stylus, or a finger in finger-draw mode)
+    private var penIgnored = false     // current pen contact was cancelled by a finger tap
     private var inkTool = Tool.PEN
+    private var inkHighlight = false
     private var inkFromFinger = false
     private var inkStartTime = 0L
     private var penHovering = false
     private var lastPenSeen = 0L
+    private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+    private val xdpi = resources.displayMetrics.xdpi.takeIf { it > 0f } ?: (160f * density)
+
+    // Finger gesture state (from first finger down to last finger up).
+    private var gStart = 0L
+    private var gMax = 0
+    private var gMoved = false
+    private var gPalm = false
+    private var navOn = false
+    private var navKey = ""
+    private var navFx = 0f
+    private var navFy = 0f
+    private var navSpan = 0f
+    private var gScale = 0f
+    private var gTx = 0f
+    private var gTy = 0f
+    private var velocity: VelocityTracker? = null
 
     private fun isPenTool(t: Int) =
         t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER || t == MotionEvent.TOOL_TYPE_MOUSE
 
-    // Time-based only: hover events may stop reaching us once we stop consuming them.
-    private fun fingersSuppressed() = SystemClock.uptimeMillis() - lastPenSeen < 450
+    /** A single resting finger right after the pen was around is most likely the writing hand. */
+    private fun penRecentlyActive() = SystemClock.uptimeMillis() - lastPenSeen < 450
+
+    /** Common-sense palm test: reported as a palm, or a contact wider than ~1.6 cm. */
+    private fun isPalm(e: MotionEvent, i: Int): Boolean {
+        if (e.getToolType(i) == 5) return true // MotionEvent.TOOL_TYPE_PALM (hidden constant)
+        val major = e.getTouchMajor(i)
+        if (major <= 0f) return false
+        return major / xdpi * 25.4f > 16f
+    }
 
     override fun onHoverEvent(e: MotionEvent): Boolean {
         val tt = e.getToolType(0)
@@ -356,204 +396,322 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
                     penHovering = true
                     val erasing = tool == Tool.ERASER || tt == MotionEvent.TOOL_TYPE_ERASER ||
                         (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-                    if (erasing && mode == Mode.NONE) {
+                    if (erasing && penId == -1) {
                         cursor = floatArrayOf(e.x, e.y, eraserRadiusPx); invalidateScene()
-                    } else if (cursor != null && mode == Mode.NONE) { cursor = null; invalidateScene() }
+                    } else if (cursor != null && penId == -1) { cursor = null; invalidateScene() }
                 }
                 MotionEvent.ACTION_HOVER_EXIT -> {
                     penHovering = false
-                    if (cursor != null && mode == Mode.NONE) { cursor = null; invalidateScene() }
+                    if (cursor != null && penId == -1) { cursor = null; invalidateScene() }
                 }
             }
-            dbgHover++
             // Observe only: consuming stylus hover changes how some OEM stacks route the pen.
             return super.onHoverEvent(e)
         }
         return super.onHoverEvent(e)
     }
 
-    // ---- input diagnostics (toggle from the ⋯ menu)
+    // Kept for the optional diagnostics overlay.
     var debugSink: ((String) -> Unit)? = null
-    private var dbgDown = 0
-    private var dbgUp = 0
-    private var dbgCancel = 0
-    private var dbgPDown = 0
-    private var dbgPUp = 0
-    private var dbgCanceledFlag = 0
-    private var dbgStitched = 0
-    private var dbgMove = 0
-    private var dbgSamples = 0
-    private var dbgHover = 0
-    /** Filled in by the activity: what the window saw before the view. */
     var windowStats: () -> String = { "" }
-    private var dbgLast = 0L
-
-    private fun debugEvent(e: MotionEvent) {
-        val sink = debugSink ?: return
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> dbgDown++
-            MotionEvent.ACTION_UP -> dbgUp++
-            MotionEvent.ACTION_CANCEL -> dbgCancel++
-            MotionEvent.ACTION_POINTER_DOWN -> dbgPDown++
-            MotionEvent.ACTION_POINTER_UP -> dbgPUp++
-            MotionEvent.ACTION_MOVE -> { dbgMove++; dbgSamples += e.historySize + 1 }
-        }
-        if ((e.flags and 0x20) != 0) dbgCanceledFlag++ // MotionEvent.FLAG_CANCELED (API 33)
-        val now = SystemClock.uptimeMillis()
-        if (e.actionMasked == MotionEvent.ACTION_MOVE && now - dbgLast < 60) return
-        dbgLast = now
-        val tools = (0 until e.pointerCount).joinToString(",") {
-            when (e.getToolType(it)) {
-                MotionEvent.TOOL_TYPE_STYLUS -> "笔"; MotionEvent.TOOL_TYPE_ERASER -> "笔尾"
-                MotionEvent.TOOL_TYPE_FINGER -> "指"; MotionEvent.TOOL_TYPE_MOUSE -> "鼠"; else -> "?"
-            }
-        }
-        sink(
-            "画布: DOWN $dbgDown  MOVE $dbgMove(采样 $dbgSamples)  UP $dbgUp  CANCEL $dbgCancel  P↓ $dbgPDown  P↑ $dbgPUp  悬停 $dbgHover  接续 $dbgStitched\n" +
-                "窗口: ${windowStats()}\n" +
-                "${MotionEvent.actionToString(e.actionMasked)}  [$tools]  history ${e.historySize}  压力 ${"%.2f".format(e.getPressure(0))}  模式 $mode  " +
-                "不合并输入=${if (unbufferedInput) "开" else "关"}  前缓冲=${if (useFrontBuffer) "开" else "关"}"
-        )
-    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (doc == null) return false
-        debugEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val idx = e.actionIndex
-                val tt = e.getToolType(idx)
-                if (isPenTool(tt)) {
+                val id = e.getPointerId(idx)
+                if (isPenTool(e.getToolType(idx))) {
                     lastPenSeen = SystemClock.uptimeMillis()
-                    when (mode) {
-                        Mode.INK -> {}
-                        Mode.NAV -> { endNav(e, false, cancelled = true); startInk(e, idx, false) }
-                        else -> startInk(e, idx, false)
+                    if (penId == -1) {
+                        stopNav(revert = false)
+                        startInk(e, idx, false)
                     }
                 } else {
-                    when (mode) {
-                        Mode.NONE -> when {
-                            fingersSuppressed() -> mode = Mode.IGNORE
-                            fingerDraws && e.pointerCount == 1 -> startInk(e, idx, true)
-                            else -> startNav(e)
+                    val palm = isPalm(e, idx)
+                    if (fingers.isEmpty() && penId == -1 && !palm && fingerDraws && e.pointerCount == 1) {
+                        beginFingerGesture(e)
+                        startInk(e, idx, true)
+                    } else {
+                        if (fingers.isEmpty()) beginFingerGesture(e)
+                        if (penId != -1 && inkFromFinger && !palm && e.eventTime - inkStartTime < 160) {
+                            // A second finger right away: it was a gesture, not writing.
+                            val oldIdx = e.findPointerIndex(penId)
+                            val oldId = penId
+                            discardInk()
+                            if (oldIdx >= 0) addFinger(oldId, e.getX(oldIdx), e.getY(oldIdx), false)
                         }
-                        Mode.NAV -> navPointerChange(e, -1)
-                        Mode.INK -> if (inkFromFinger && e.eventTime - inkStartTime < 160) {
-                            cancelInk(); startNav(e)
-                        }
-                        Mode.IGNORE -> {}
+                        addFinger(id, e.getX(idx), e.getY(idx), palm)
+                        velocity?.addMovement(e)
                     }
                 }
             }
-            MotionEvent.ACTION_MOVE -> when (mode) {
-                Mode.INK -> inkMove(e)
-                Mode.NAV -> navMove(e)
-                else -> {}
+            MotionEvent.ACTION_MOVE -> {
+                if (penId != -1) inkMove(e)
+                if (fingers.isNotEmpty()) fingersMove(e)
             }
-            MotionEvent.ACTION_POINTER_UP -> {
+            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
                 val idx = e.actionIndex
-                when (mode) {
-                    Mode.INK -> if (e.getPointerId(idx) == inkPointerId) { inkUp(e, idx); mode = Mode.IGNORE }
-                    Mode.NAV -> navPointerChange(e, idx)
-                    else -> {}
+                val id = e.getPointerId(idx)
+                val canceled = (e.flags and 0x20) != 0 // MotionEvent.FLAG_CANCELED (API 33+)
+                if (id == penId) {
+                    if (canceled && inkFromFinger) discardInk() else inkUp(e, idx)
+                } else {
+                    fingers[id]?.let { f ->
+                        if (canceled) markPalm(f)
+                        velocity?.addMovement(e)
+                        fingers.remove(id)
+                        if (fingers.isEmpty()) endFingerGesture(e) else navReference()
+                    }
                 }
-            }
-            MotionEvent.ACTION_UP -> {
-                when (mode) {
-                    Mode.INK -> if (e.getPointerId(0) == inkPointerId) inkUp(e, 0)
-                    Mode.NAV -> endNav(e, true, cancelled = false)
-                    else -> {}
+                if (e.actionMasked == MotionEvent.ACTION_UP) {
+                    if (penId != -1) inkUp(e, idx)
+                    if (fingers.isNotEmpty()) { fingers.clear(); endFingerGesture(e) }
+                    penIgnored = false
                 }
-                mode = Mode.NONE
             }
             MotionEvent.ACTION_CANCEL -> {
-                when (mode) {
-                    Mode.INK -> cancelInk()
-                    Mode.NAV -> endNav(e, false, cancelled = true)
-                    else -> {}
+                if (penId != -1) cancelInk()
+                penIgnored = false
+                if (fingers.isNotEmpty()) {
+                    fingers.clear()
+                    stopNav(revert = false)
+                    velocity?.recycle(); velocity = null
                 }
-                mode = Mode.NONE
             }
         }
         return true
     }
 
+    // ---- fingers
+
+    private fun beginFingerGesture(e: MotionEvent) {
+        scroller.forceFinished(true)
+        gStart = e.eventTime
+        gMax = 0; gMoved = false; gPalm = false; navOn = false; navKey = ""
+        gScale = scale; gTx = tx; gTy = ty
+        velocity?.recycle()
+        velocity = VelocityTracker.obtain().also { it.addMovement(e) }
+    }
+
+    private fun addFinger(id: Int, x: Float, y: Float, palm: Boolean) {
+        fingers[id] = Finger(id, x, y, x, y, palm)
+        if (palm) gPalm = true
+        gMax = max(gMax, fingers.values.count { !it.palm })
+        navReference()
+    }
+
+    private fun markPalm(f: Finger) {
+        if (f.palm) return
+        f.palm = true
+        gPalm = true
+        // Whatever the palm did to the view is undone.
+        if (navOn) stopNav(revert = true)
+        navReference()
+    }
+
+    private fun activeFingers() = fingers.values.filter { !it.palm }
+
+    /** Navigation needs real fingers, no pen stroke in progress, and caution right after writing. */
+    private fun canNavigate(active: List<Finger>): Boolean {
+        if (penId != -1 && !penIgnored) return false
+        return when {
+            active.size >= 2 -> true
+            active.size == 1 -> !penRecentlyActive() || navOn
+            else -> false
+        }
+    }
+
+    private fun fingersMove(e: MotionEvent) {
+        velocity?.addMovement(e)
+        for (f in fingers.values) {
+            val i = e.findPointerIndex(f.id)
+            if (i < 0) continue
+            f.x = e.getX(i); f.y = e.getY(i)
+            if (!f.palm && isPalm(e, i)) markPalm(f)
+            if (!f.palm && hypot(f.x - f.x0, f.y - f.y0) > touchSlop) gMoved = true
+        }
+        val active = activeFingers()
+        if (!canNavigate(active)) return
+        if (!navOn) {
+            if (!gMoved) return
+            navOn = true
+            navReference()
+            return
+        }
+        val key = active.joinToString(",") { it.id.toString() }
+        if (key != navKey) { navReference(); return }
+        val (fx, fy, span) = focalAndSpan(active)
+        val dx = fx - navFx; val dy = fy - navFy
+        tx += dx; ty += dy
+        if (active.size >= 2 && navSpan > 0f && span > 0f) zoomBy(span / navSpan, fx, fy)
+        navFx = fx; navFy = fy; navSpan = span
+        afterViewportChange(false)
+    }
+
+    private fun focalAndSpan(active: List<Finger>): Triple<Float, Float, Float> {
+        var sx = 0f; var sy = 0f
+        for (f in active) { sx += f.x; sy += f.y }
+        val fx = sx / active.size; val fy = sy / active.size
+        var span = 0f
+        if (active.size > 1) { for (f in active) span += hypot(f.x - fx, f.y - fy); span /= active.size }
+        return Triple(fx, fy, span)
+    }
+
+    private fun navReference() {
+        val active = activeFingers()
+        navKey = active.joinToString(",") { it.id.toString() }
+        if (active.isEmpty()) return
+        val (fx, fy, span) = focalAndSpan(active)
+        navFx = fx; navFy = fy; navSpan = span
+    }
+
+    private fun stopNav(revert: Boolean) {
+        if (revert && navOn) { scale = gScale; tx = gTx; ty = gTy }
+        if (navOn || revert) afterViewportChange(true)
+        navOn = false
+    }
+
+    private fun endFingerGesture(e: MotionEvent) {
+        val dur = e.eventTime - gStart
+        val vt = velocity
+        velocity = null
+        if (twoFingerTapUndo && !gMoved && !navOn && !gPalm && dur < 350 && gMax >= 2) {
+            if (gMax == 2) twoFingerTap() else redo()
+        } else if (navOn && gMax == 1 && vt != null) {
+            vt.computeCurrentVelocity(1000)
+            val id = e.getPointerId(e.actionIndex)
+            val vx = vt.getXVelocity(id); val vy = vt.getYVelocity(id)
+            if (hypot(vx, vy) > 400f * density) startFling(vx, vy)
+        }
+        vt?.recycle()
+        val wasNav = navOn
+        navOn = false
+        if (wasNav) afterViewportChange(true)
+    }
+
+    /** Two-finger tap: undo; while the pen is mid-stroke, drop that stroke instead. */
+    private fun twoFingerTap() {
+        if (penId != -1 && !inkFromFinger && !penIgnored) {
+            if (inkTool == Tool.PEN) {
+                val id = penId
+                discardInk()
+                penId = id          // keep swallowing this pen contact until it lifts
+                penIgnored = true
+                listener?.onHint("已取消这一笔")
+            }
+            return
+        }
+        undo()
+    }
+
+    // ---- pen
+
     private fun startInk(e: MotionEvent, idx: Int, fromFinger: Boolean) {
         if (unbufferedInput) requestUnbufferedDispatch(e)
         scroller.forceFinished(true)
-        mode = Mode.INK
-        inkPointerId = e.getPointerId(idx)
+        penId = e.getPointerId(idx)
+        penIgnored = false
         inkFromFinger = fromFinger
         inkStartTime = e.eventTime
         val tt = e.getToolType(idx)
         val sideButton = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-        inkTool = if (tt == MotionEvent.TOOL_TYPE_ERASER || (sideButton && tool == Tool.PEN)) Tool.ERASER else tool
+        val drawTool = tool == Tool.PEN || tool == Tool.HIGHLIGHTER
+        inkTool = when {
+            tt == MotionEvent.TOOL_TYPE_ERASER || (sideButton && drawTool) -> Tool.ERASER
+            drawTool -> Tool.PEN
+            else -> tool
+        }
+        inkHighlight = tool == Tool.HIGHLIGHTER && inkTool == Tool.PEN
         val x = e.getX(idx); val y = e.getY(idx)
         if (penSuspended) {
-            if (inkTool == Tool.PEN && !fromFinger && canResume(x, y, e.eventTime)) {
+            if (inkTool == Tool.PEN && !fromFinger && inkHighlight == strokeHighlight && canResume(x, y, e.eventTime)) {
                 resumePen(x, y, pressureOf(e, idx, -1))
                 return
             }
             finalizePen()
         }
         when (inkTool) {
-            Tool.PEN -> penDown(x, y, pressureOf(e, idx, -1))
             Tool.ERASER -> eraseDown(x, y)
             Tool.LASSO -> lassoDown(x, y)
+            else -> penDown(x, y, pressureOf(e, idx, -1))
         }
     }
 
     private fun inkMove(e: MotionEvent) {
-        val idx = e.findPointerIndex(inkPointerId)
+        if (penIgnored || penId < 0) return
+        val idx = e.findPointerIndex(penId)
         if (idx < 0) return
         if (!inkFromFinger) lastPenSeen = SystemClock.uptimeMillis()
         when (inkTool) {
-            Tool.PEN -> {
-                for (h in 0 until e.historySize) penSample(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h), pressureOf(e, idx, h))
-                penSample(e.getX(idx), e.getY(idx), pressureOf(e, idx, -1))
-                emitWet()
-            }
             Tool.ERASER -> {
                 for (h in 0 until e.historySize) eraseTo(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h))
                 eraseTo(e.getX(idx), e.getY(idx))
             }
             Tool.LASSO -> lassoMove(e.getX(idx), e.getY(idx))
+            else -> {
+                if (shapeSnapped) return
+                for (h in 0 until e.historySize) penSample(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h), pressureOf(e, idx, h))
+                penSample(e.getX(idx), e.getY(idx), pressureOf(e, idx, -1))
+                emitWet()
+            }
         }
     }
 
     private fun inkUp(e: MotionEvent, idx: Int) {
+        if (penIgnored || penId < 0) { penId = -1; penIgnored = false; return }
         if (!inkFromFinger) lastPenSeen = SystemClock.uptimeMillis()
         when (inkTool) {
-            Tool.PEN -> {
-                penSample(e.getX(idx), e.getY(idx), pressureOf(e, idx, -1)); emitWet()
-                if (inkFromFinger) { penSuspended = true; finalizePen() } else suspendPen(e.eventTime, UP_STITCH_MS)
-            }
             Tool.ERASER -> { eraseTo(e.getX(idx), e.getY(idx)); eraseUp() }
             Tool.LASSO -> { lassoMove(e.getX(idx), e.getY(idx)); lassoUp() }
+            else -> {
+                removeCallbacks(holdRunnable)
+                if (!shapeSnapped) { penSample(e.getX(idx), e.getY(idx), pressureOf(e, idx, -1)); emitWet() }
+                if (inkFromFinger || shapeSnapped) { penSuspended = true; finalizePen() }
+                else suspendPen(e.eventTime, UP_STITCH_MS)
+            }
         }
-        inkPointerId = -1
+        penId = -1
     }
 
+    /** System cancel: keep a stylus stroke (it may resume), discard anything else. */
     private fun cancelInk() {
+        if (penIgnored || penId < 0) { penId = -1; penIgnored = false; return }
         when (inkTool) {
-            Tool.PEN -> {
-                if (!inkFromFinger && pts.size > 0) {
+            Tool.ERASER -> eraseUp()
+            Tool.LASSO -> { lassoScreen = null; lassoWorld = null; selDrag = 0; selection?.transform?.reset(); invalidateScene() }
+            else -> {
+                removeCallbacks(holdRunnable)
+                if (!inkFromFinger && pts.size > 0 && !shapeSnapped) {
                     // Many OEM palm-rejection layers cancel the stream mid-stroke and then
                     // restart it with a fresh DOWN. Keep the ink and try to stitch.
                     suspendPen(SystemClock.uptimeMillis(), CANCEL_STITCH_MS)
-                } else {
-                    renderer?.cancel()
-                    frontActive = false
-                    pts.clear(); spts.clear()
-                    if (pendingScene) { pendingScene = false; invalidateScene() }
-                }
+                } else if (shapeSnapped) {
+                    penSuspended = true; finalizePen()
+                } else discardWet()
             }
+        }
+        penId = -1
+    }
+
+    /** Throws away the stroke in progress. */
+    private fun discardInk() {
+        when (inkTool) {
             Tool.ERASER -> eraseUp()
             Tool.LASSO -> { lassoScreen = null; lassoWorld = null; selDrag = 0; selection?.transform?.reset(); invalidateScene() }
+            else -> { removeCallbacks(holdRunnable); discardWet() }
         }
-        inkPointerId = -1
-        mode = Mode.NONE
+        penId = -1
+    }
+
+    private fun discardWet() {
+        if (useFrontBuffer) renderer?.cancel()
+        frontActive = false
+        shapeSnapped = false
+        pts.clear(); spts.clear()
+        pendingScene = false
+        invalidateScene()
     }
 
     private fun pressureOf(e: MotionEvent, idx: Int, h: Int): Float {
@@ -570,17 +728,23 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private var emitted = 0         // samples already drawn to the front buffer
     private var smoothP = -1f
     private var strokeColor = INK_BLACK
+    private var strokeHighlight = false
     private var baseR = 1f
 
     private fun penDown(x: Float, y: Float, p: Float) {
         frontActive = true
+        shapeSnapped = false
         pts.clear(); spts.clear(); emitted = 0; smoothP = -1f
-        strokeColor = penColor
-        baseR = PEN_SIZES[penSize.coerceIn(0, 2)] / 2f
+        strokeHighlight = inkHighlight
+        strokeColor = if (strokeHighlight) HIGHLIGHT else penColor
+        baseR = (if (strokeHighlight) HIGHLIGHT_SIZE else PEN_SIZES[penSize.coerceIn(0, 2)]) / 2f
+        holdX = x; holdY = y
         penSample(x, y, p)
         if (useFrontBuffer) renderer?.renderFrontBufferedLayer(WetBatch(strokeColor, spts.copyRange(0, 3), 1))
         else invalidateScene()
         emitted = 1
+        removeCallbacks(holdRunnable)
+        postDelayed(holdRunnable, HOLD_MS)
     }
 
     private fun penSample(x: Float, y: Float, p: Float) {
@@ -590,11 +754,18 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             if (dx * dx + dy * dy < 0.36f) return
         }
         smoothP = if (smoothP < 0f) p else smoothP + 0.32f * (p - smoothP)
-        // Width range ~2.1x between light and full pressure (was ~2.7x), with a heavier
-        // smoothing so small pressure wobbles barely change the line.
-        val r = baseR * (0.45f + 0.70f * smoothP.pow(0.85f))
+        // Width range ~2.1x between light and full pressure, smoothed so small pressure
+        // wobbles barely change the line. Highlighters barely react to pressure.
+        val r = if (strokeHighlight) baseR * (0.9f + 0.15f * smoothP)
+        else baseR * (0.45f + 0.70f * smoothP.pow(0.85f))
         pts.add(toWorldX(x)); pts.add(toWorldY(y)); pts.add(r)
         spts.add(x); spts.add(y); spts.add(r * scale)
+        // Hold-to-straighten: restart the timer whenever the pen really moves.
+        if (hypot(x - holdX, y - holdY) > 3.5f * density) {
+            holdX = x; holdY = y
+            removeCallbacks(holdRunnable)
+            postDelayed(holdRunnable, HOLD_MS)
+        }
     }
 
     private fun emitWet() {
@@ -607,6 +778,39 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         else invalidateScene()
         emitted = n
     }
+
+    // ---- hold to straighten / perfect shapes
+
+    private var holdX = 0f
+    private var holdY = 0f
+    private var shapeSnapped = false
+    private val holdRunnable = Runnable { trySnapShape() }
+
+    private fun trySnapShape() {
+        if (penId < 0 || penIgnored || inkTool != Tool.PEN || shapeSnapped || pts.size < 9) return
+        val n = pts.size / 3
+        val xs = FloatArray(n) { pts[3 * it] }
+        val ys = FloatArray(n) { pts[3 * it + 1] }
+        var rSum = 0f
+        for (i in 0 until n) rSum += pts[3 * i + 2]
+        val shape = Shapes.recognize(xs, ys, minSize = 18f * density / scale) ?: return
+        val r = rSum / n
+        pts.clear(); spts.clear()
+        for (i in 0 until shape.size / 2) {
+            val wx = shape[2 * i]; val wy = shape[2 * i + 1]
+            pts.add(wx); pts.add(wy); pts.add(r)
+            spts.add(wx * scale + tx); spts.add(wy * scale + ty); spts.add(r * scale)
+        }
+        shapeSnapped = true
+        emitted = spts.size / 3
+        performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+        if (useFrontBuffer) {
+            renderer?.cancel()
+            renderer?.renderFrontBufferedLayer(WetBatch(strokeColor, spts.toArray(), spts.size / 3))
+        } else invalidateScene()
+    }
+
+    // ---- brief contact loss: stitch instead of breaking the line
 
     private var penSuspended = false
     private var suspendedAt = 0L
@@ -632,7 +836,6 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private fun resumePen(x: Float, y: Float, p: Float) {
         removeCallbacks(finalizeRunnable)
         penSuspended = false
-        dbgStitched++
         penSample(x, y, p)
         emitWet()
     }
@@ -643,7 +846,9 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private fun finalizePen() {
         if (!penSuspended) return
         removeCallbacks(finalizeRunnable)
+        removeCallbacks(holdRunnable)
         penSuspended = false
+        shapeSnapped = false
         val d = doc
         val n = pts.size / 3
         if (d != null && n > 0) {
@@ -946,7 +1151,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         val sel = selection ?: return
         val d = doc ?: return
         if (!sel.hasStrokes) return
-        val ns = sel.strokes.map { it.withColor(color) }
+        val ns = sel.strokes.map { if (it.isHighlight) it else it.withColor(color) }
         d.perform(Edit.Replace(sel.strokes, ns))
         listener?.onHistoryChanged()
         if (autoReturnAfterLasso) finishOperation() else setSelection(ns, sel.images)
@@ -1010,79 +1215,11 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         if (d.redo()) { listener?.onHistoryChanged(); listener?.onHint("重做") }
     }
 
-    // ---------------------------------------------------------------- navigation
+    // ---------------------------------------------------------------- fling
 
     private val scroller = OverScroller(context)
-    private var velocity: VelocityTracker? = null
-    private var navFx = 0f
-    private var navFy = 0f
-    private var navSpan = 0f
-    private var navCount = 0
-    private var navStart = 0L
-    private var navMaxPointers = 0
-    private var navMovement = 0f
     private var flingX = 0
     private var flingY = 0
-
-    private fun startNav(e: MotionEvent) {
-        finalizePen()
-        mode = Mode.NAV
-        scroller.forceFinished(true)
-        navStart = e.eventTime
-        navMaxPointers = e.pointerCount
-        navMovement = 0f
-        velocity?.recycle()
-        velocity = VelocityTracker.obtain().also { it.addMovement(e) }
-        navReference(e, -1)
-    }
-
-    private fun navReference(e: MotionEvent, exclude: Int) {
-        var sx = 0f; var sy = 0f; var c = 0
-        for (i in 0 until e.pointerCount) { if (i == exclude) continue; sx += e.getX(i); sy += e.getY(i); c++ }
-        if (c == 0) { navCount = 0; return }
-        val fx = sx / c; val fy = sy / c
-        var span = 0f
-        for (i in 0 until e.pointerCount) { if (i == exclude) continue; span += hypot(e.getX(i) - fx, e.getY(i) - fy) }
-        navFx = fx; navFy = fy; navSpan = if (c > 1) span / c else 0f; navCount = c
-    }
-
-    private fun navPointerChange(e: MotionEvent, liftingIndex: Int) {
-        navMaxPointers = max(navMaxPointers, e.pointerCount)
-        velocity?.addMovement(e)
-        navReference(e, liftingIndex)
-    }
-
-    private fun navMove(e: MotionEvent) {
-        velocity?.addMovement(e)
-        val prevFx = navFx; val prevFy = navFy; val prevSpan = navSpan; val prevCount = navCount
-        navReference(e, -1)
-        if (navCount != prevCount) return
-        val dx = navFx - prevFx; val dy = navFy - prevFy
-        tx += dx; ty += dy
-        navMovement += abs(dx) + abs(dy)
-        if (navCount >= 2 && prevSpan > 0f && navSpan > 0f) {
-            zoomBy(navSpan / prevSpan, navFx, navFy)
-            navMovement += abs(navSpan - prevSpan)
-        }
-        afterViewportChange(false)
-    }
-
-    private fun endNav(e: MotionEvent, allowFling: Boolean, cancelled: Boolean) {
-        val vt = velocity
-        velocity = null
-        val dur = e.eventTime - navStart
-        if (!cancelled && twoFingerTapUndo && navMaxPointers >= 2 && dur < 300 && navMovement < 16f * density) {
-            if (navMaxPointers == 2) undo() else redo()
-        } else if (allowFling && navMaxPointers == 1 && vt != null) {
-            vt.addMovement(e)
-            vt.computeCurrentVelocity(1000)
-            val vx = vt.xVelocity; val vy = vt.yVelocity
-            if (hypot(vx, vy) > 400f * density) startFling(vx, vy)
-        }
-        vt?.recycle()
-        mode = Mode.NONE
-        afterViewportChange(true)
-    }
 
     private val flingRunnable = object : Runnable {
         override fun run() {
@@ -1100,6 +1237,29 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         flingX = 0; flingY = 0
         scroller.fling(0, 0, vx.toInt(), vy.toInt(), -1_000_000, 1_000_000, -1_000_000, 1_000_000)
         postOnAnimation(flingRunnable)
+    }
+
+    // ---------------------------------------------------------------- PDF pages
+
+    /** Index of the page under the middle of the screen, or -1 for a blank canvas. */
+    fun currentPage(): Int {
+        val p = pdf ?: return -1
+        val cy = toWorldY(height / 2f)
+        var best = 0
+        var bestDist = Float.MAX_VALUE
+        p.pageRects.forEachIndexed { i, r ->
+            val d = if (cy < r.top) r.top - cy else if (cy > r.bottom) cy - r.bottom else 0f
+            if (d < bestDist) { bestDist = d; best = i }
+        }
+        return best
+    }
+
+    fun goToPage(index: Int) {
+        val p = pdf ?: return
+        val r = p.pageRects.getOrNull(index) ?: return
+        scroller.forceFinished(true)
+        ty = 10f * density - r.top * scale
+        afterViewportChange(true)
     }
 }
 

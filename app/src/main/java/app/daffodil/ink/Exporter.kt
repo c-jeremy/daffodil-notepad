@@ -34,7 +34,9 @@ object Exporter {
             b.recycle()
         }
         val p = inkPaint.get()!!
-        for (s in strokes) {
+        // Highlights first so they sit underneath the ink.
+        for (pass in 0..1) for (s in strokes) {
+            if (s.isHighlight != (pass == 0)) continue
             if (clip != null && !RectF.intersects(s.bounds, clip)) continue
             p.color = s.color
             c.drawPath(s.path, p)
@@ -143,6 +145,7 @@ object Exporter {
                 val c = page.canvas
                 c.drawColor(Color.WHITE)
                 c.scale(sc, sc); c.translate(-b.left, -b.top)
+                if (s.meta.paper != 0) Paper.draw(c, s.meta.paper, b, 1f, 1f)
                 drawItems(c, s.dir, s.strokes, s.images, null, ImageCache.MAX_DIM)
                 pdf.finishPage(page)
             }
@@ -161,6 +164,7 @@ object Exporter {
         val c = Canvas(bmp)
         c.drawColor(Color.WHITE)
         c.scale(sc, sc); c.translate(-b.left, -b.top)
+        if (s.meta.paper != 0) Paper.draw(c, s.meta.paper, b, 1f, 1f)
         drawItems(c, s.dir, s.strokes, s.images, null, ImageCache.MAX_DIM)
         bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
         bmp.recycle()

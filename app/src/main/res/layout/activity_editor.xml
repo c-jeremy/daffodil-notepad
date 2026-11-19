@@ -3,7 +3,8 @@
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/paper">
+    android:background="@color/paper"
+    android:splitMotionEvents="true">
 
     <app.daffodil.ink.InkSurface
         android:id="@+id/ink"
@@ -20,7 +21,8 @@
         android:elevation="5dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="2dp">
+        android:padding="2dp"
+        android:splitMotionEvents="true">
 
         <ImageView android:id="@+id/btnBack" style="@style/ToolButton" android:src="@drawable/ic_back" android:contentDescription="返回" />
 
@@ -30,6 +32,7 @@
         <app.daffodil.ui.SwatchView android:id="@+id/penRed" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="红色笔" />
         <app.daffodil.ui.SwatchView android:id="@+id/penBlue" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="蓝色笔" />
         <app.daffodil.ui.SizeView android:id="@+id/penSize" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="笔触粗细" />
+        <ImageView android:id="@+id/btnHighlighter" style="@style/ToolButton" android:src="@drawable/ic_highlighter" android:contentDescription="荧光笔" />
 
         <View style="@style/ToolDivider" />
 
@@ -66,6 +69,22 @@
         <app.daffodil.ui.SwatchView android:id="@+id/selRed" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="改为红色" />
         <app.daffodil.ui.SwatchView android:id="@+id/selBlue" android:layout_width="30dp" android:layout_height="30dp" android:layout_marginStart="1dp" android:layout_marginEnd="1dp" android:background="@drawable/bg_tool" android:contentDescription="改为蓝色" />
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/pageLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="10dp"
+        android:background="@drawable/bg_toolbar"
+        android:elevation="3dp"
+        android:paddingStart="10dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="4dp"
+        android:textColor="@color/ink"
+        android:textSize="12sp"
+        android:visibility="gone" />
 
     <TextView
         android:id="@+id/hint"

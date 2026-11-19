@@ -76,6 +76,7 @@ object DocStore {
             viewCx = j.optDouble("cx", Double.NaN).toFloat(),
             viewCy = j.optDouble("cy", Double.NaN).toFloat(),
             viewZoom = j.optDouble("zoom", Double.NaN).toFloat(),
+            paper = j.optInt("paper", 0),
         )
     }.getOrNull()
 
@@ -83,6 +84,7 @@ object DocStore {
         val j = JSONObject()
             .put("id", m.id).put("title", m.title).put("kind", m.kind.name)
             .put("created", m.created).put("modified", m.modified).put("pages", m.pageCount)
+            .put("paper", m.paper)
         if (!m.viewCx.isNaN()) j.put("cx", m.viewCx.toDouble()).put("cy", m.viewCy.toDouble()).put("zoom", m.viewZoom.toDouble())
         atomicWrite(File(d, "meta.json")) { it.write(j.toString().toByteArray()) }
     }
