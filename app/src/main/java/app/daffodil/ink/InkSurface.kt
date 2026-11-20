@@ -57,8 +57,8 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         const val HIGHLIGHT_SIZE = 11f
         private const val HOLD_MS = 450L
         private const val CHUNK = 48
-        private const val UP_STITCH_MS = 60L
-        private const val CANCEL_STITCH_MS = 180L
+        private const val UP_STITCH_MS = 35L
+        private const val CANCEL_STITCH_MS = 150L
         private const val MIN_ZOOM = 0.08f
         private const val MAX_ZOOM = 40f
         private val DUMMY = listOf(WetBatch(0, FloatArray(0), 0))
@@ -232,6 +232,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     private val drawer = SceneDrawer(density)
     @Volatile private var frame: Frame? = null
     private val chunks = ArrayList<Chunk?>()
+    private val culled = HashSet<Int>()
     private var sceneScheduled = false
     private var pendingScene = false
     private var frontActive = false
@@ -297,10 +298,21 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         val selDraw = sel?.let { s ->
             SelectionDraw(s.chunk, s.images.map { ImgDraw(it.rect, images?.get(it.file)) }, Matrix(s.transform), s.bounds)
         }
+        // Only draw chunks on screen. A RenderNode that leaves the drawn tree has its
+        // display list freed by the renderer, so a chunk that was skipped must be
+        // re-recorded before it is drawn again (otherwise its strokes come back blank).
+        val visChunks = ArrayList<Chunk>()
+        for (k in chunks.indices) {
+            var c = chunks[k] ?: continue
+            if (RectF.intersects(c.bounds, vis)) {
+                if (culled.remove(k)) { c = ChunkRecorder.record(c.strokes); chunks[k] = c }
+                visChunks.add(c)
+            } else culled.add(k)
+        }
         return Frame(
             m, vis, pdf != null,
             pdf?.drawList(vis) ?: emptyList(),
-            imgs, chunks.filterNotNull(), selDraw,
+            imgs, visChunks, selDraw,
             lassoScreen?.toArray(), cursor,
             if (!useFrontBuffer && frontActive && spts.size >= 3) WetBatch(strokeColor, spts.toArray(), spts.size / 3) else null,
             if (pdf == null) paper else 0,
@@ -323,6 +335,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
                 if (skip == null || s.id !in skip) list.add(s)
             }
             chunks[k] = ChunkRecorder.record(list)
+            culled.remove(k)
         }
     }
 
@@ -379,12 +392,15 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
     /** A single resting finger right after the pen was around is most likely the writing hand. */
     private fun penRecentlyActive() = SystemClock.uptimeMillis() - lastPenSeen < 450
 
-    /** Common-sense palm test: reported as a palm, or a contact wider than ~1.6 cm. */
-    private fun isPalm(e: MotionEvent, i: Int): Boolean {
+    /**
+     * Common-sense palm test: reported as a palm, or a contact far wider than a fingertip.
+     * Thumbs and flat finger pads during a pinch can reach ~1.8 cm, so the bar is set above that.
+     */
+    private fun isPalm(e: MotionEvent, i: Int, limitMm: Float = 22f): Boolean {
         if (e.getToolType(i) == 5) return true // MotionEvent.TOOL_TYPE_PALM (hidden constant)
         val major = e.getTouchMajor(i)
         if (major <= 0f) return false
-        return major / xdpi * 25.4f > 16f
+        return major / xdpi * 25.4f > limitMm
     }
 
     override fun onHoverEvent(e: MotionEvent): Boolean {
@@ -506,8 +522,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         if (f.palm) return
         f.palm = true
         gPalm = true
-        // Whatever the palm did to the view is undone.
-        if (navOn) stopNav(revert = true)
+        // The palm simply stops contributing; the view is never pulled back.
         navReference()
     }
 
@@ -529,7 +544,8 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             val i = e.findPointerIndex(f.id)
             if (i < 0) continue
             f.x = e.getX(i); f.y = e.getY(i)
-            if (!f.palm && isPalm(e, i)) markPalm(f)
+            // A contact that grows a lot while it moves is a palm settling down.
+            if (!f.palm && !navOn && isPalm(e, i, 26f)) markPalm(f)
             if (!f.palm && hypot(f.x - f.x0, f.y - f.y0) > touchSlop) gMoved = true
         }
         val active = activeFingers()
@@ -652,8 +668,12 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             Tool.LASSO -> lassoMove(e.getX(idx), e.getY(idx))
             else -> {
                 if (shapeSnapped) return
-                for (h in 0 until e.historySize) penSample(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h), pressureOf(e, idx, h))
+                for (h in 0 until e.historySize) {
+                    penSample(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h), pressureOf(e, idx, h))
+                    trackVelocity(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h), e.getHistoricalEventTime(h))
+                }
                 penSample(e.getX(idx), e.getY(idx), pressureOf(e, idx, -1))
+                trackVelocity(e.getX(idx), e.getY(idx), e.eventTime)
                 emitWet()
             }
         }
@@ -739,6 +759,7 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         strokeColor = if (strokeHighlight) HIGHLIGHT else penColor
         baseR = (if (strokeHighlight) HIGHLIGHT_SIZE else PEN_SIZES[penSize.coerceIn(0, 2)]) / 2f
         holdX = x; holdY = y
+        penVx = 0f; penVy = 0f; penLastT = 0L
         penSample(x, y, p)
         if (useFrontBuffer) renderer?.renderFrontBufferedLayer(WetBatch(strokeColor, spts.copyRange(0, 3), 1))
         else invalidateScene()
@@ -753,11 +774,11 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
             val dx = x - spts[spts.size - 3]; val dy = y - spts[spts.size - 2]
             if (dx * dx + dy * dy < 0.36f) return
         }
-        smoothP = if (smoothP < 0f) p else smoothP + 0.32f * (p - smoothP)
+        smoothP = if (smoothP < 0f) p else smoothP + 0.25f * (p - smoothP)
         // Width range ~2.1x between light and full pressure, smoothed so small pressure
         // wobbles barely change the line. Highlighters barely react to pressure.
         val r = if (strokeHighlight) baseR * (0.9f + 0.15f * smoothP)
-        else baseR * (0.45f + 0.70f * smoothP.pow(0.85f))
+        else baseR * (0.55f + 0.55f * smoothP.pow(0.9f))
         pts.add(toWorldX(x)); pts.add(toWorldY(y)); pts.add(r)
         spts.add(x); spts.add(y); spts.add(r * scale)
         // Hold-to-straighten: restart the timer whenever the pen really moves.
@@ -812,6 +833,22 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
 
     // ---- brief contact loss: stitch instead of breaking the line
 
+    // Pen velocity on screen (px/ms), smoothed, for stitching decisions.
+    private var penVx = 0f
+    private var penVy = 0f
+    private var penLastT = 0L
+    private var penLastX = 0f
+    private var penLastY = 0f
+
+    private fun trackVelocity(x: Float, y: Float, t: Long) {
+        val dt = (t - penLastT).toFloat()
+        if (penLastT != 0L && dt in 1f..60f) {
+            penVx = 0.5f * penVx + 0.5f * (x - penLastX) / dt
+            penVy = 0.5f * penVy + 0.5f * (y - penLastY) / dt
+        } else if (dt > 60f) { penVx = 0f; penVy = 0f }
+        penLastT = t; penLastX = x; penLastY = y
+    }
+
     private var penSuspended = false
     private var suspendedAt = 0L
     private var suspendWindow = 0L
@@ -826,11 +863,20 @@ class InkSurface(context: Context, attrs: AttributeSet? = null) :
         postDelayed(finalizeRunnable, window + 8)
     }
 
+    /**
+     * Resume only if the new contact lands where the pen would have been had it kept
+     * moving: a real lift and re-touch almost never does that within a few milliseconds.
+     */
     private fun canResume(x: Float, y: Float, time: Long): Boolean {
-        if (time - suspendedAt > suspendWindow) return false
+        val dt = (time - suspendedAt).toFloat()
+        if (dt > suspendWindow) return false
         val n = spts.size
         if (n < 3) return false
-        return hypot(x - spts[n - 3], y - spts[n - 2]) < 32f * density
+        val px = spts[n - 3] + penVx * dt
+        val py = spts[n - 2] + penVy * dt
+        val travel = hypot(penVx, penVy) * dt
+        val slack = if (suspendWindow > UP_STITCH_MS) 0.6f else 0.35f
+        return hypot(x - px, y - py) < 4f * density + slack * travel
     }
 
     private fun resumePen(x: Float, y: Float, p: Float) {
